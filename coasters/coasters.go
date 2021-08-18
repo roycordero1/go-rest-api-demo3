@@ -1,58 +1,58 @@
 package coasters
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/mux"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
-	"sync"
 	"time"
 )
 
 type Coaster struct {
+	ID           string `json:"id"`
 	Name         string `json:"name"`
 	Manufacturer string `json:"manufacturer"`
-	ID           string `json:"id"`
 	InPark       string `json:"in_park"`
 	Height       int    `json:"height"`
 }
 
 type coastersHandler struct {
-	sync.Mutex
-	store map[string]Coaster
+	DB *sql.DB
 }
 
-func NewCoastersHandler() *coastersHandler {
+func NewCoastersHandler(db *sql.DB) *coastersHandler {
 	return &coastersHandler{
-		store: map[string]Coaster{},
+		DB: db,
 	}
 }
 
 func (h *coastersHandler) ListCoasters(w http.ResponseWriter, r *http.Request) {
 
 	// List the coasters
-	coasters := make([]Coaster, len(h.store))
-
-	h.Lock()
-	i := 0
-	for _, coaster := range h.store {
-		coasters[i] = coaster
-		i++
-	}
-	h.Unlock()
-
-	// Write body as json to return response
-	jsonBytes, err := json.Marshal(coasters)
+	rows, err := h.DB.Query("SELECT id, name, manufacturer, in_park, height FROM coasters")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(err.Error()))
+		return
 	}
 
+	coasters := []Coaster{}
+	for rows.Next() {
+		var coaster Coaster
+		if err = rows.Scan(&coaster.ID, &coaster.Name, &coaster.Manufacturer, &coaster.InPark, &coaster.Height); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+		coasters = append(coasters, coaster)
+	}
+
+	// Write body as json to return response
 	w.Header().Add("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	json.NewEncoder(w).Encode(coasters)
 }
 
 func (h *coastersHandler) GetCoaster(w http.ResponseWriter, r *http.Request) {
@@ -61,24 +61,62 @@ func (h *coastersHandler) GetCoaster(w http.ResponseWriter, r *http.Request) {
 	id := params["id"]
 
 	// Search for existing coaster
-	h.Lock()
-	coaster, ok := h.store[id]
-	h.Unlock()
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		return
+	row := h.DB.QueryRow("SELECT id, name, manufacturer, in_park, height FROM coasters WHERE id = ?", id)
+
+	var coaster Coaster
+	if err := row.Scan(&coaster.ID, &coaster.Name, &coaster.Manufacturer, &coaster.InPark, &coaster.Height); err != nil {
+		if err == sql.ErrNoRows {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Coaster Not Found!"))
+			return
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
 	}
 
 	// Write body as json to return response
-	jsonBytes, err := json.Marshal(coaster)
+	w.Header().Add("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(coaster)
+}
+
+func (h *coastersHandler) GetRandomCoaster(w http.ResponseWriter, r *http.Request) {
+
+	// List the coasters
+	rows, err := h.DB.Query("SELECT id, name, manufacturer, in_park, height FROM coasters")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(err.Error()))
+		return
 	}
 
-	w.Header().Add("content-type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	var coasters []Coaster
+	for rows.Next() {
+		var coaster Coaster
+		if err = rows.Scan(&coaster.ID, &coaster.Name, &coaster.Manufacturer, &coaster.InPark, &coaster.Height); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+		coasters = append(coasters, coaster)
+	}
+
+	var target string
+	if len(coasters) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("No Coasters Found!"))
+		return
+	} else if len(coasters) == 1 {
+		target = coasters[0].ID
+	} else {
+		rand.Seed(time.Now().UnixNano())
+		target = coasters[rand.Intn(len(coasters))].ID
+	}
+
+	w.Header().Add("location", fmt.Sprintf("/api/v1/coasters/%s", target))
+	w.WriteHeader(http.StatusFound)
 }
 
 func (h *coastersHandler) CreateCoaster(w http.ResponseWriter, r *http.Request) {
@@ -91,16 +129,8 @@ func (h *coastersHandler) CreateCoaster(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	bodyBytes, err := ioutil.ReadAll(r.Body)
-	defer r.Body.Close()
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
-		return
-	}
-
 	var coaster Coaster
-	err = json.Unmarshal(bodyBytes, &coaster)
+	err := json.NewDecoder(r.Body).Decode(&coaster)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
@@ -109,51 +139,30 @@ func (h *coastersHandler) CreateCoaster(w http.ResponseWriter, r *http.Request) 
 
 	// Save the coaster
 	coaster.ID = fmt.Sprintf("%d", time.Now().UnixNano())
-	h.Lock()
-	h.store[coaster.ID] = coaster
-	defer h.Unlock()
-}
-
-func (h *coastersHandler) GetRandomCoaster(w http.ResponseWriter, r *http.Request) {
-
-	ids := make([]string, len(h.store))
-
-	h.Lock()
-	i := 0
-	for id := range h.store {
-		ids[i] = id
-		i++
-	}
-	defer h.Unlock()
-
-	var target string
-	if len(ids) == 0 {
-		w.WriteHeader(http.StatusNotFound)
+	statement, err := h.DB.Prepare("INSERT INTO coasters(id, name, manufacturer, in_park, height) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
 		return
-	} else if len(ids) == 1 {
-		target = ids[0]
-	} else {
-		rand.Seed(time.Now().UnixNano())
-		target = ids[rand.Intn(len(ids))]
 	}
 
-	w.Header().Add("location", fmt.Sprintf("/api/v1/coasters/%s", target))
-	w.WriteHeader(http.StatusFound)
+	_, err = statement.Exec(coaster.ID, coaster.Name, coaster.Manufacturer, coaster.InPark, coaster.Height)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	// Write body as json to return response
+	w.Header().Add("content-type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(coaster)
 }
 
 func (h *coastersHandler) UpdateCoaster(w http.ResponseWriter, r *http.Request) {
 
 	params := mux.Vars(r)
 	id := params["id"]
-
-	// Search for existing coaster
-	h.Lock()
-	_, ok := h.store[id]
-	h.Unlock()
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
 
 	// Read body to update the coaster
 	ct := r.Header.Get("content-type")
@@ -163,16 +172,8 @@ func (h *coastersHandler) UpdateCoaster(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	bodyBytes, err := ioutil.ReadAll(r.Body)
-	defer r.Body.Close()
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(err.Error()))
-		return
-	}
-
-	var newCoaster Coaster
-	err = json.Unmarshal(bodyBytes, &newCoaster)
+	var coaster Coaster
+	err := json.NewDecoder(r.Body).Decode(&coaster)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
@@ -180,10 +181,31 @@ func (h *coastersHandler) UpdateCoaster(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Save the coaster
-	newCoaster.ID = id
-	h.Lock()
-	h.store[id] = newCoaster
-	h.Unlock()
+	statement, err := h.DB.Prepare("UPDATE coasters SET name = ?, manufacturer = ?, in_park = ?, height = ? WHERE id = ?")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	result, err := statement.Exec(coaster.Name, coaster.Manufacturer, coaster.InPark, coaster.Height, id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	if qtyRowsAffected, _ := result.RowsAffected(); qtyRowsAffected == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Coaster Not Found or Data Not Changing!"))
+		return
+	}
+
+	// Write body as json to return response
+	w.Header().Add("content-type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	coaster.ID = id
+	json.NewEncoder(w).Encode(coaster)
 }
 
 func (h *coastersHandler) DeleteCoaster(w http.ResponseWriter, r *http.Request) {
@@ -191,17 +213,28 @@ func (h *coastersHandler) DeleteCoaster(w http.ResponseWriter, r *http.Request) 
 	params := mux.Vars(r)
 	id := params["id"]
 
-	// Search for existing coaster
-	h.Lock()
-	_, ok := h.store[id]
-	h.Unlock()
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
+	// Delete the coaster
+	statement, err := h.DB.Prepare("DELETE FROM coasters WHERE id = ?")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
 		return
 	}
 
-	// Delete the coaster
-	h.Lock()
-	delete(h.store, id)
-	h.Unlock()
+	result, err := statement.Exec(id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	if qtyRowsAffected, _ := result.RowsAffected(); qtyRowsAffected == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Coaster Not Found!"))
+		return
+	}
+
+	// Return response
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Coaster Deleted!"))
 }
