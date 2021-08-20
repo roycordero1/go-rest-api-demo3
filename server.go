@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"github.com/go-gorp/gorp"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
@@ -25,7 +26,7 @@ var (
 )
 
 type Env struct {
-	DB *sql.DB
+	DB *gorp.DbMap
 }
 
 func (env *Env) initDatabase() error {
@@ -41,10 +42,17 @@ func (env *Env) initDatabase() error {
 		}
 	}
 
+	// construct a gorp DbMap
+	dbmap := &gorp.DbMap{Db: db, Dialect: gorp.MySQLDialect{Engine: "InnoDB", Encoding: "UTF8MB4"}}
+
 	log.Printf("Database connected!")
 
-	env.DB = db
+	env.DB = dbmap
 	return nil
+}
+
+func (env *Env) initTables() {
+	env.DB.AddTableWithName(coasters.Coaster{}, "coasters")
 }
 
 func main() {
@@ -55,6 +63,8 @@ func main() {
 		log.Fatal("Error initializing the database. The error is: " + err.Error())
 		return
 	}
+
+	env.initTables()
 
 	admin := admin.NewAdminHandler()
 	coastersHandler := coasters.NewCoastersHandler(env.DB)
